@@ -20,9 +20,22 @@ GROUPS = {
     "/api/v1/stocks/all": "STOCK_ALL",
     "/api/v1/prices": "MARKET_DATA",
     "/api/v1/candles": "MARKET_DATA_CHART",
+    "/api/v1/stocks": "STOCK",
+    "/api/v1/orderbook": "MARKET_DATA",
+    "/api/v1/price-limits": "MARKET_DATA",
     "/api/v1/market-calendar/KR": "MARKET_INFO",
     "/api/v1/market-calendar/US": "MARKET_INFO",
 }
+
+
+def endpoint_group(path):
+    if path in GROUPS:
+        return GROUPS[path]
+    if re.fullmatch(r"/api/v1/stocks/[A-Za-z0-9][A-Za-z0-9.\-]{0,63}/warnings", path):
+        return "STOCK"
+    if re.fullmatch(r"/api/v1/market-indicators/(KOSPI|KOSDAQ)/candles", path):
+        return "MARKET_INDICATOR_CHART"
+    return None
 
 
 class Transport:
@@ -104,10 +117,10 @@ class Transport:
         return 2 ** attempt + random.uniform(0, 0.2)
 
     def request(self, method, path, params=None, token=None, form=None):
-        if not ((method == "GET" and path in GROUPS) or
+        if not ((method == "GET" and endpoint_group(path) is not None) or
                 (method == "POST" and path == "/oauth2/token")):
             raise TmonError("unsupported-endpoint", "조회 CLI에서 허용하지 않는 API입니다.", 2)
-        group = GROUPS.get(path, "AUTH")
+        group = endpoint_group(path) or "AUTH"
         url = path + ("?" + urlencode(params) if params else "")
         headers = {"Accept": "application/json", "User-Agent": "tmon/0.1"}
         if token:
@@ -168,7 +181,7 @@ class TossClient:
         self.auth, self.transport = auth, transport
 
     def get(self, path, **params):
-        if path not in GROUPS:
+        if endpoint_group(path) is None:
             raise TmonError("unsupported-endpoint", "조회 CLI에서 허용하지 않는 API입니다.", 2)
         token = self.auth.token()
         try:

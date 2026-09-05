@@ -1,0 +1,38 @@
+{
+  "configVersion": 1,
+  "capital": null,
+  "maxLossPct": null,
+  "research": "auto",
+  "model": null,
+  "universe": {
+    "rankCount": 50,
+    "detailLimit": 30,
+    "researchLimit": 5
+  },
+  "day": {
+    "minEstimatedAvgDailyAmount": "10000000000",
+    "maxSpreadPct": "0.30",
+    "minVolumeRatio": "1.5",
+    "maxBreakoutGapPct": "1.0"
+  },
+  "swing": {
+    "minEstimatedAvgDailyAmount": "10000000000",
+    "maxSpreadPct": "0.50",
+    "minVolumeRatio": "1.5",
+    "maxBreakoutGapPct": "3.0"
+  },
+  "freshness": {
+    "rankingSeconds": 120,
+    "quoteSeconds": 15,
+    "minuteSeconds": 120,
+    "stateSeconds": 30,
+    "resultSeconds": 30,
+    "barCompletionDelaySeconds": 5
+  },
+  "budget": {
+    "totalSeconds": 180,
+    "dataSeconds": 80,
+    "researchSeconds": 70,
+    "finalSeconds": 30
+  }
+}

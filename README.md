@@ -1,10 +1,10 @@
 # tmon — 주가 조회·분석 CLI
 
-토스증권 Open API를 사용하는 조회 전용 CLI다. 종목 검색·랭킹·관심종목 관리, 현재가·일봉 조회와 SMA20·60, RSI14, 거래량 배수 계산을 지원한다. 주문·계좌 API는 포함하지 않는다.
+토스증권 Open API를 사용하는 조회·분석 CLI다. 종목 검색·랭킹·관심종목 관리, 현재가·일봉·기술적 지표와 국내 당일·2~5거래일 돌파 후보 추천을 지원한다. 추천에는 선택적으로 Codex 웹 조사를 연결한다. 주문·계좌 API는 포함하지 않는다.
 
 ## 실행
 
-Python 3.9 이상과 macOS 또는 Linux가 필요하다. 런타임 외부 패키지나 설치 과정 없이 워크스페이스에서 실행할 수 있다.
+Python 3.10 이상과 macOS 또는 Linux가 필요하다. 기본 조회와 정량 추천은 표준 라이브러리만 사용한다. `./bin/tmon`은 프로젝트 `.venv`가 있으면 자동으로 사용한다. Codex 웹 조사는 선택적 SDK 설치가 필요하다.
 
 ```sh
 ./bin/tmon --help
@@ -44,10 +44,46 @@ Python 3.9 이상과 macOS 또는 Linux가 필요하다. 런타임 외부 패키
 | `history SYMBOL --count N` | 완료된 수정주가 일봉 1~200개, 기본 20개 |
 | `history SYMBOL --unadjusted` | 수정주가 미적용 일봉 |
 | `analyze SYMBOL` | 최대 120봉으로 기본 기술적 지표 계산 |
+| `recommend --horizon day` | 장중 5분봉 돌파 후보, 기본 최대 3개 |
+| `recommend --horizon swing` | 완료 일봉의 20일 고가 돌파 후보, 2~5거래일 보유 가정 |
 
 모든 명령에서 `--json`, `--no-color`를 지원한다. 기본 출력은 색상 없는 표다. JSON의 금액·수량·계산 결과는 십진 문자열이며 소수점 8자리까지 반올림한다. 변화율의 `Pct`는 퍼센트, `Ratio`는 배수다. `--help`는 항상 일반 도움말을 출력한다.
 
-`volumeRatio`는 최근 완료 일봉 거래량을 **그 직전 20봉의 평균 거래량**으로 나눈 값이다. RSI는 Wilder 방식이며 계산 기간과 봉 수가 결과에 포함된다. 지표값이 없는 경우 0으로 채우지 않고 `null`과 사유를 제공한다.
+`analyze`의 `volumeRatio`는 최근 완료 일봉 거래량을 **그 직전 20봉의 평균 거래량**으로 나눈 값이다. 추천 day의 거래량 배수는 최신 완료 5분봉과 직전 5개 5분봉 평균의 비교다. RSI는 Wilder 방식이며 계산 기간과 봉 수가 결과에 포함된다. 지표값이 없는 경우 0으로 채우지 않고 `null`과 사유를 제공한다.
+
+## 단기매매 후보 추천
+
+```sh
+./bin/tmon recommend --horizon day
+./bin/tmon recommend --horizon swing --json
+./bin/tmon recommend --horizon day --research off
+./bin/tmon recommend --horizon swing --capital 1000000 --max-loss-pct 4
+./bin/tmon recommend --horizon day --config docs/examples/recommend.json
+```
+
+랭킹으로 후보를 모으고 완료 봉·거래량·호가·거래 상태를 평가한다. 정량 상위 후보의 뉴스·공시를 조사한 뒤 최신 시세와 조건을 재검증한다. 결과에는 진입 기준·범위, 무효화 가격, 위험폭의 1.5~2배로 정한 목표 구간, 시세 시각·유효 기한, 출처를 표시한다. 수치 기준은 [설정 예제](docs/examples/recommend.json)를 복사해 조정할 수 있다.
+
+**현재 지원 범위:** KRX 정규장 시간의 코스피·코스닥 보통주이며 NXT 지원 종목도 포함한다. 현재가·호가·분봉·일봉·랭킹은 거래소를 분리하거나 직접 합산하지 않고 **토스 제공 시세 기준**으로 사용한다. JSON에는 `venueScope=TOSS_PROVIDED`, `venueBasis=provider-default`를 기록한다. 첫 버전은 랭킹에서 최대 30개를 상세 평가하며 전 종목 스크리닝은 아니다.
+
+일봉은 토스가 제공하는 완료 일봉을 그대로 사용하므로 정규장만의 OHLCV라고 가정하지 않는다. 거래소별 합산 방식과 과거 집계 기준은 운영 관측 항목이며, 범위 미확인만으로 종목을 제외하지 않는다. KRX 또는 지원되는 NXT의 거래정지가 명시되거나 거래소 구분 없이 VI·종목 경고가 있으면 해당 후보를 제외한다.
+
+day는 개장 30분 후부터 정규장 종료 30분 전까지, swing은 개장 30분 후부터 종가단일가 시작 전까지 신규 진입을 평가한다. 휴장·장외에는 빈 결과로 정상 종료한다. 단순 조건 미충족(`no-match`)과 데이터 부족(`insufficient-data`)을 구분한다. 필수 시세나 분봉이 오래됐으면 추천하지 않는다.
+
+웹 조사 설정은 기본 `auto`다. 아래처럼 SDK를 설치하고 Codex CLI에 ChatGPT로 로그인해 사용한다.
+
+```sh
+uv venv --python python3.11 .venv
+uv pip install --python .venv/bin/python -e '.[ai]'
+codex login status
+# 로그인이 없는 환경에서만 실행
+codex login
+```
+
+SDK 0.147.0과 포함 런타임을 사용한다. API 키 로그인으로 자동 전환하지 않는다. SDK 미설치·인증 불가·검색 시간 초과 시 정량 결과를 보존하고 웹 조사 불가를 표시한다. `--research off`는 SDK를 실행하지 않는다. 웹 해석은 정량 순위를 바꾸지 않으며 확인된 재료와 반대 근거를 덧붙인다. 조사에는 종목 식별 정보만 보내고 토스 인증값과 투입 금액은 전달하지 않는다.
+
+실행 기록은 macOS의 `~/Library/Application Support/tmon/recommend/runs/`, Linux의 `$XDG_DATA_HOME/tmon/recommend/runs/`(기본 `~/.local/share/tmon/recommend/runs/`)에 저장한다. `result.json`, 사용 데이터 `inputs.json`, 출처·요약 `research.json`을 보존한다. 뉴스 캐시는 day 15분, swing 60분이다. 자동 삭제는 하지 않는다.
+
+추천 전체 예산은 기본 180초이며 일부 종목의 데이터가 없거나 예산에 걸리면 부분 결과와 종료 코드 5다. 웹 조사만 불가하면 `status=partial`, 종료 코드 0이다. [상세 조건과 한계](docs/design/recommend.md)를 참고한다.
 
 ## 종목 검색
 
@@ -184,5 +220,6 @@ python3 -m unittest discover -v
 - [랭킹 설계](docs/design/rank.md)
 - [관심종목 설계](docs/design/watchlist.md)
 - [관심종목 프로필 설계](docs/design/watchlist-profiles.md)
+- [국내 단기매매 후보 추천 설계](docs/design/recommend.md) — 당일·2~5거래일 후보와 Codex 웹 조사
 - [구조·확장 계획](docs/design/architecture-and-roadmap.md)
 - [구현 검증 기록](docs/implementation-verification.md)

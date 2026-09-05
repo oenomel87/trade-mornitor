@@ -6,6 +6,8 @@
 
 2단계에서 추가한 명령은 [종목 검색](./search.md), [랭킹](./rank.md), [관심종목](./watchlist.md), [프로필](./watchlist-profiles.md) 명세를 따른다. 공통 JSON 출력 계약은 동일하다.
 
+국내 단기매매 [추천 명령](./recommend.md)은 별도 전략·시간 예산·선택적 SDK 조사를 사용하며 같은 JSON envelope을 따른다.
+
 ## 공통 규칙
 
 - 명령 구조: `tmon <command> [arguments] [options]`

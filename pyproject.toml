@@ -6,8 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "toss-market-monitor"
 version = "0.1.0"
 description = "Read-only Toss Securities market data CLI"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
+
+[project.optional-dependencies]
+ai = ["openai-codex==0.147.0"]
 
 [project.scripts]
 tmon = "tmon.cli:main"

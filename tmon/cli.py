@@ -37,6 +37,14 @@ def parser():
     h.add_argument("--unadjusted", action="store_true", help="수정주가 미적용")
     a = commands.add_parser("analyze", parents=[common], help="SMA20·60, RSI14, 거래량 배수")
     a.add_argument("symbol", metavar="SYMBOL")
+    rec = commands.add_parser("recommend", parents=[common], help="국내 당일·2~5거래일 돌파 후보 추천")
+    rec.add_argument("--horizon", required=True, choices=("day", "swing"))
+    rec.add_argument("--market", default="KR", type=str.upper, choices=("KR",))
+    rec.add_argument("--limit", type=int, default=3)
+    rec.add_argument("--capital", help="종목당 가정 투입 원화 금액")
+    rec.add_argument("--max-loss-pct", help="진입가 대비 무효화 가격 거리 상한 (%%)")
+    rec.add_argument("--research", choices=("auto", "off"), default=None, help="기본 auto: 기존 ChatGPT 로그인으로 웹 조사")
+    rec.add_argument("--config", help="추천 설정 JSON 파일")
     s = commands.add_parser("search", parents=[common], help="종목명·코드 검색 (24시간 캐시)")
     s.add_argument("query", metavar="QUERY")
     s.add_argument("--market", type=str.upper, choices=MARKET_CHOICES, default="ALL", help="검색 시장 (기본 ALL)")
@@ -96,6 +104,9 @@ def envelope(command):
 
 
 def run(args, result):
+    if args.command == "recommend":
+        from .recommend import run_recommend
+        return run_recommend(args, result)
     if args.command == "profile":
         store = Watchlist()
         result["meta"].update(source="local", action=args.action, watchlistFile=str(store.path))
@@ -212,6 +223,9 @@ def render(result, json_mode):
         table(["CHECK", "STATUS"], list(data.items()))
     elif result["command"] == "quote":
         table(["SYMBOL", "PRICE", "CCY", "AS OF"], [[r[k] for k in ("symbol", "lastPrice", "currency", "timestamp")] for r in data])
+    elif result["command"] == "recommend":
+        from .recommend_render import render_recommend
+        render_recommend(data, meta, table)
     elif result["command"] == "profile":
         table(["PROFILE", "SYMBOLS", "ACTIVE", "UPDATED AT"],
               [[row["name"], row["symbolCount"], "*" if row["active"] else "", row["updatedAt"]] for row in data])
@@ -278,7 +292,7 @@ def render(result, json_mode):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    command = next((arg for arg in argv if arg in ("doctor", "quote", "history", "analyze", "search", "rank", "watchlist", "profile")), None)
+    command = next((arg for arg in argv if arg in ("doctor", "quote", "history", "analyze", "search", "rank", "watchlist", "profile", "recommend")), None)
     result = envelope(command)
     try:
         args = parser().parse_args(argv)
