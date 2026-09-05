@@ -53,6 +53,8 @@ Python 3.10 이상과 macOS 또는 Linux가 필요하다. 기본 조회와 정�
 
 ## 단기매매 후보 추천
 
+실행 예제, 추천 조건, 결과 해석과 문제 해결은 [추천 기능 사용 가이드](docs/recommend.md)를 참고한다.
+
 ```sh
 ./bin/tmon recommend --horizon day
 ./bin/tmon recommend --horizon swing --json
