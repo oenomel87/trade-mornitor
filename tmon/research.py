@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from .market import timestamp
 from .errors import TmonError
 from .recommend_store import encode
+from .recommend_config import RESEARCH_EFFORT
 
 PROMPT_VERSION = 'news-v1'
 
@@ -93,7 +94,7 @@ def research(candidates, horizon, config, seconds, store=None, asof=None):
     output, pending, keys = {}, [], {}
     ttl = 900 if horizon == 'day' else 3600
     for row in candidates:
-        material = [row['symbol'],horizon,config['model'],PROMPT_VERSION,asof.date().isoformat()]
+        material = [row['symbol'],horizon,config['model'],RESEARCH_EFFORT,PROMPT_VERSION,asof.date().isoformat()]
         key = hashlib.sha256(json.dumps(material).encode()).hexdigest()
         keys[row['symbol']] = key
         cached = store.cache_read(key) if store else None
@@ -106,7 +107,8 @@ def research(candidates, horizon, config, seconds, store=None, asof=None):
         except (ValueError, KeyError, TypeError, TmonError):
             pass  # Corrupt/expired caches are optional.
         pending.append({k:row[k] for k in ('symbol','name','market')})
-    metadata = {'status':'ok', 'promptVersion':PROMPT_VERSION, 'sdkVersion':'0.147.0'}
+    metadata = {'status':'ok', 'promptVersion':PROMPT_VERSION, 'sdkVersion':'0.147.0',
+                'reasoningEffort':RESEARCH_EFFORT}
     if not pending:
         return output, {**metadata, 'cacheHit':True}
     if seconds <= 0:

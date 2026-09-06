@@ -10,7 +10,7 @@ import tempfile
 import unittest
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from tmon.cli import main, envelope
 from tmon.client import endpoint_group, TossClient, Transport
@@ -123,6 +123,13 @@ class FakeClient:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_fixed_model_and_legacy_null(self):
+        self.assertEqual(load_config()['model'],'gpt-5.6-sol')
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'config.json';p.write_text('{"model":null}')
+            self.assertEqual(load_config(p)['model'],'gpt-5.6-sol')
+            p.write_text('{"model":"another-model"}')
+            with self.assertRaises(TmonError):load_config(p)
     def test_overrides_and_unknown(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/'c.json';p.write_text('{"capital":"10","research":"off"}')
@@ -366,6 +373,34 @@ class EngineTests(unittest.TestCase):
 
 
 class ResearchTests(unittest.TestCase):
+    def test_worker_pins_model_and_effort(self):
+        from tmon.research_worker import main as worker_main
+        sdk=MagicMock()
+        runtime=sdk.Codex.return_value.__enter__.return_value
+        runtime.account.return_value.model_dump.return_value={'account':{'type':'chatgpt'}}
+        runtime.thread_start.return_value.run.return_value=SimpleNamespace(
+            items=[],final_response='{"items":[]}',usage=None)
+        payload={'model':None,'horizon':'day','candidates':[]}
+        with patch.dict('sys.modules',{'openai_codex':sdk}), \
+             patch('sys.stdin',io.StringIO(json.dumps(payload))), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            worker_main()
+        self.assertEqual(json.loads(out.getvalue())['model'],'gpt-5.6-sol')
+        self.assertEqual(runtime.thread_start.call_args.kwargs['model'],'gpt-5.6-sol')
+        self.assertEqual(runtime.thread_start.return_value.run.call_args.kwargs['effort'],'high')
+        runtime.models.assert_not_called()
+
+    def test_low_effort_cache_is_not_reused(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as td:
+            store=Store(Path(td).resolve())
+            key=hashlib.sha256(json.dumps(['000001','day','gpt-5.6-sol','news-v1',NOW.date().isoformat()]).encode()).hexdigest()
+            store.cache_write(key,{'item':self.item(),'model':'gpt-5.6-sol','retrievedAt':NOW.isoformat()})
+            r,_=research([{'symbol':'000001','name':'test','market':'KOSPI'}],
+                         'day',load_config(),0,store=store,asof=NOW)
+            self.assertFalse(r['000001']['cacheHit'])
+            self.assertEqual(r['000001']['reason'],'research-timeout')
+
     def item(self):
         return {'symbol':'000001','researchStatus':'verified','summary':'확인된 공시',
                 'catalysts':[{'text':'실적 공시','sourceIds':['a'],'eventAt':None}],
@@ -406,7 +441,7 @@ class ResearchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             store=Store(Path(td).resolve())
             import hashlib
-            key=hashlib.sha256(json.dumps(['000001','day',None,'news-v1',NOW.date().isoformat()]).encode()).hexdigest()
+            key=hashlib.sha256(json.dumps(['000001','day','gpt-5.6-sol','high','news-v1',NOW.date().isoformat()]).encode()).hexdigest()
             store.cache_write(key,{'item':self.item(),'model':'test','retrievedAt':NOW.isoformat()})
             with patch('subprocess.Popen',side_effect=AssertionError('cache missed')):
                 r,m=research([{'symbol':'000001','name':'test','market':'KOSPI'}],'day',load_config(),1,store=store,asof=NOW)

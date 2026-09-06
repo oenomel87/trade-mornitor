@@ -37,6 +37,13 @@ def parser():
     h.add_argument("--unadjusted", action="store_true", help="수정주가 미적용")
     a = commands.add_parser("analyze", parents=[common], help="SMA20·60, RSI14, 거래량 배수")
     a.add_argument("symbol", metavar="SYMBOL")
+    brief = commands.add_parser("brief", parents=[common], help="국내 시황·주요 뉴스 브리핑 (KST)")
+    brief.add_argument("--session", choices=("auto", "premarket", "intraday", "close"), default="auto")
+    brief.add_argument("--profile", metavar="NAME", help="해당 프로필의 관심종목 소식 추가 (저장된 선택 유지)")
+    brief.add_argument("--profile-limit", type=int, default=10, help="프로필 앞 1~20개 조회·조사 (기본 10)")
+    brief.add_argument("--research", choices=("auto", "off"), default="auto")
+    brief.add_argument("--refresh", action="store_true", help="뉴스 캐시를 사용하지 않고 새로 조사")
+    brief.add_argument("--timeout", type=int, default=240, help="전체 실행 예산 30~600초 (기본 240)")
     rec = commands.add_parser("recommend", parents=[common], help="국내 당일·2~5거래일 돌파 후보 추천")
     rec.add_argument("--horizon", required=True, choices=("day", "swing"))
     rec.add_argument("--market", default="KR", type=str.upper, choices=("KR",))
@@ -104,6 +111,9 @@ def envelope(command):
 
 
 def run(args, result):
+    if args.command == "brief":
+        from .brief import run_brief
+        return run_brief(args, result)
     if args.command == "recommend":
         from .recommend import run_recommend
         return run_recommend(args, result)
@@ -223,6 +233,9 @@ def render(result, json_mode):
         table(["CHECK", "STATUS"], list(data.items()))
     elif result["command"] == "quote":
         table(["SYMBOL", "PRICE", "CCY", "AS OF"], [[r[k] for k in ("symbol", "lastPrice", "currency", "timestamp")] for r in data])
+    elif result["command"] == "brief":
+        from .brief_render import render_brief
+        render_brief(data, meta, table)
     elif result["command"] == "recommend":
         from .recommend_render import render_recommend
         render_recommend(data, meta, table)
@@ -292,7 +305,7 @@ def render(result, json_mode):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    command = next((arg for arg in argv if arg in ("doctor", "quote", "history", "analyze", "search", "rank", "watchlist", "profile", "recommend")), None)
+    command = next((arg for arg in argv if arg in ("doctor", "quote", "history", "analyze", "search", "rank", "watchlist", "profile", "recommend", "brief")), None)
     result = envelope(command)
     try:
         args = parser().parse_args(argv)

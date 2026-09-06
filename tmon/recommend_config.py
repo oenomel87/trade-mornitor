@@ -7,8 +7,11 @@ from pathlib import Path
 
 from .errors import TmonError
 
+RESEARCH_MODEL = 'gpt-5.6-sol'
+RESEARCH_EFFORT = 'high'
+
 DEFAULTS = {
-    'configVersion': 1, 'capital': None, 'maxLossPct': None, 'research': 'auto', 'model': None,
+    'configVersion': 1, 'capital': None, 'maxLossPct': None, 'research': 'auto', 'model': RESEARCH_MODEL,
     'universe': {'rankCount': 50, 'detailLimit': 30, 'researchLimit': 5},
     'day': {'minEstimatedAvgDailyAmount': '10000000000', 'maxSpreadPct': '0.30',
             'minVolumeRatio': '1.5', 'maxBreakoutGapPct': '1.0'},
@@ -72,7 +75,9 @@ def load_config(path=None, *, capital=None, max_loss_pct=None, research=None, li
             c[k] = v
     if type(c['configVersion']) is not int or c['configVersion'] != 1 or c['research'] not in ('auto', 'off'):
         raise bad()
-    if c['model'] is not None and (not isinstance(c['model'], str) or not c['model'].strip() or len(c['model']) > 100):
+    if c['model'] is None:
+        c['model'] = RESEARCH_MODEL  # Compatibility with older configuration files.
+    if c['model'] != RESEARCH_MODEL:
         raise bad()
     for key in ('capital', 'maxLossPct'):
         if c[key] is not None:

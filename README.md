@@ -1,6 +1,6 @@
 # tmon — 주가 조회·분석 CLI
 
-토스증권 Open API를 사용하는 조회·분석 CLI다. 종목 검색·랭킹·관심종목 관리, 현재가·일봉·기술적 지표와 국내 당일·2~5거래일 돌파 후보 추천을 지원한다. 추천에는 선택적으로 Codex 웹 조사를 연결한다. 주문·계좌 API는 포함하지 않는다.
+토스증권 Open API를 사용하는 조회·분석 CLI다. 종목 검색·랭킹·관심종목 관리, 현재가·일봉·기술적 지표와 국내 당일·2~5거래일 돌파 후보 추천, 시황·주요 뉴스 브리핑을 지원한다. 추천과 브리핑에는 선택적으로 Codex 웹 조사를 연결한다. 주문·계좌 API는 포함하지 않는다.
 
 ## 실행
 
@@ -19,6 +19,7 @@ Python 3.10 이상과 macOS 또는 Linux가 필요하다. 기본 조회와 정�
 ./bin/tmon history 005930 --count 20
 ./bin/tmon analyze AAPL
 ./bin/tmon analyze AAPL --json
+./bin/tmon brief
 ```
 
 `python3 -m tmon ...`도 동일하게 동작한다. 다른 디렉터리에서는 `/path/to/trade-mornitor/bin/tmon`처럼 실행 파일의 절대 경로를 사용할 수 있다. Python 패키지로 설치할 경우 `pyproject.toml`의 `tmon` 실행 진입점을 이용할 수 있다.
@@ -44,12 +45,28 @@ Python 3.10 이상과 macOS 또는 Linux가 필요하다. 기본 조회와 정�
 | `history SYMBOL --count N` | 완료된 수정주가 일봉 1~200개, 기본 20개 |
 | `history SYMBOL --unadjusted` | 수정주가 미적용 일봉 |
 | `analyze SYMBOL` | 최대 120봉으로 기본 기술적 지표 계산 |
+| `brief` | KST 기준 장전·장중·장마감·휴장일 시황과 주요 뉴스 브리핑 |
 | `recommend --horizon day` | 장중 5분봉 돌파 후보, 기본 최대 3개 |
 | `recommend --horizon swing` | 완료 일봉의 20일 고가 돌파 후보, 2~5거래일 보유 가정 |
 
 모든 명령에서 `--json`, `--no-color`를 지원한다. 기본 출력은 색상 없는 표다. JSON의 금액·수량·계산 결과는 십진 문자열이며 소수점 8자리까지 반올림한다. 변화율의 `Pct`는 퍼센트, `Ratio`는 배수다. `--help`는 항상 일반 도움말을 출력한다.
 
 `analyze`의 `volumeRatio`는 최근 완료 일봉 거래량을 **그 직전 20봉의 평균 거래량**으로 나눈 값이다. 추천 day의 거래량 배수는 최신 완료 5분봉과 직전 5개 5분봉 평균의 비교다. RSI는 Wilder 방식이며 계산 기간과 봉 수가 결과에 포함된다. 지표값이 없는 경우 0으로 채우지 않고 `null`과 사유를 제공한다.
+
+## 시황·주요 뉴스 브리핑
+
+`tmon brief`는 국내 지수·KRX 거래대금과 투자자별 순매수·랭킹을 조회하고 Codex SDK로 국내외 주요 뉴스와 예정 일정을 조사한다. 한국시간과 시장 캘린더로 브리핑 유형을 자동 선택하며 휴장일에도 동작한다. 뉴스 사실과 영향 해석, 원문 출처·게시 시각을 구분한다.
+
+```sh
+./bin/tmon brief
+./bin/tmon brief --session premarket
+./bin/tmon brief --session close --json
+./bin/tmon brief --profile 국내주식
+./bin/tmon brief --research off
+./bin/tmon brief --refresh --timeout 300
+```
+
+뉴스 캐시는 장중 10분·그 외 30분이고 시세는 매번 조회한다. 기본 실행 예산은 240초다. 기존 추천의 ChatGPT 로그인·SDK·모델 설정을 사용한다. `--profile`은 선택한 프로필만 읽으며 기본 앞 10개를 조회·조사한다. 브리핑 커맨드는 한 번 실행 후 종료하며 예약·알림 전송은 별도로 연결한다. [상세 사용법과 데이터 기준](docs/brief.md)을 참고한다.
 
 ## 단기매매 후보 추천
 
@@ -71,7 +88,7 @@ Python 3.10 이상과 macOS 또는 Linux가 필요하다. 기본 조회와 정�
 
 day는 개장 30분 후부터 정규장 종료 30분 전까지, swing은 개장 30분 후부터 종가단일가 시작 전까지 신규 진입을 평가한다. 휴장·장외에는 빈 결과로 정상 종료한다. 단순 조건 미충족(`no-match`)과 데이터 부족(`insufficient-data`)을 구분한다. 필수 시세나 분봉이 오래됐으면 추천하지 않는다.
 
-웹 조사 설정은 기본 `auto`다. 아래처럼 SDK를 설치하고 Codex CLI에 ChatGPT로 로그인해 사용한다.
+웹 조사 설정은 기본 `auto`이며 모델은 `gpt-5.6-sol`, 추론 강도는 `high`로 고정한다. 아래처럼 SDK를 설치하고 Codex CLI에 ChatGPT로 로그인해 사용한다.
 
 ```sh
 uv venv --python python3.11 .venv

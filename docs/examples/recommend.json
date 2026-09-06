@@ -3,7 +3,7 @@
   "capital": null,
   "maxLossPct": null,
   "research": "auto",
-  "model": null,
+  "model": "gpt-5.6-sol",
   "universe": {
     "rankCount": 50,
     "detailLimit": 30,

@@ -16,6 +16,7 @@ from .errors import TmonError, invalid_data
 
 HOST = "openapi.tossinvest.com"
 GROUPS = {
+    "/api/v1/market-indicators/prices": "MARKET_INDICATOR",
     "/api/v1/rankings": "RANKING",
     "/api/v1/stocks/all": "STOCK_ALL",
     "/api/v1/prices": "MARKET_DATA",
@@ -35,6 +36,8 @@ def endpoint_group(path):
         return "STOCK"
     if re.fullmatch(r"/api/v1/market-indicators/(KOSPI|KOSDAQ)/candles", path):
         return "MARKET_INDICATOR_CHART"
+    if re.fullmatch(r"/api/v1/market-indicators/(KOSPI|KOSDAQ)/investor-trading", path):
+        return "MARKET_INDICATOR"
     return None
 
 
