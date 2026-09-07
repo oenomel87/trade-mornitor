@@ -47,7 +47,7 @@ def session(raw, now, horizon):
         raise invalid_data('시장 세션을 해석할 수 없습니다.') from None
 
 
-def completed_minutes(raw, now, start, delay=5):
+def completed_minutes(raw, now, start, delay=5, warnings=None):
     if not isinstance(raw, dict) or not isinstance(raw.get('candles'), list):
         raise invalid_data()
     rows = {}
@@ -55,8 +55,17 @@ def completed_minutes(raw, now, start, delay=5):
         t, row = normalize_candle(item, 'KRW')
         if t.second or t.microsecond:
             raise invalid_data('분봉 시작 시각이 분 경계가 아닙니다.')
-        if t > now + timedelta(seconds=5):
-            raise invalid_data('미래 분봉입니다.')
+        next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        if t > next_boundary:
+            error = TmonError('future-minute-bar', '다음 분 경계보다 먼 미래 분봉입니다.')
+            error.details = {'evaluatedAt': now.isoformat(), 'barTimestamp': t.isoformat()}
+            raise error
+        if t > now:
+            if warnings is not None:
+                warnings.append({'code': 'future-minute-bar-skipped',
+                                 'message': '다음 분 경계의 미래 봉을 계산에서 제외했습니다.',
+                                 'evaluatedAt': now.isoformat(), 'barTimestamp': t.isoformat()})
+            continue
         if t < start or t + timedelta(minutes=1, seconds=delay) > now:
             continue
         if t in rows and rows[t] != row:

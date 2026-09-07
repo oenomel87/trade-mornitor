@@ -90,9 +90,19 @@ def daily_data(client, symbol, today, now):
     return rows
 
 
-def minute_data(client, symbol, session, now, settings):
+def minute_data(client, symbol, session, now, settings, warnings=None):
     raw = client.get('/api/v1/candles', symbol=symbol, interval='1m', count=125, adjusted='true')
-    rows = completed_minutes(raw, now, session['start'], settings['barCompletionDelaySeconds'])
+    retrieved_at = client.records[-1]['retrievedAt'] if isinstance(client, RecordingClient) else None
+    diagnostics = []
+    try:
+        rows = completed_minutes(raw, now, session['start'], settings['barCompletionDelaySeconds'], diagnostics)
+    except TmonError as error:
+        error.details = {**getattr(error, 'details', {}), 'evaluatedAt': now.isoformat(),
+                         'retrievedAt': retrieved_at}
+        raise
+    finally:
+        if warnings is not None:
+            warnings.extend({**item, 'symbol': symbol, 'retrievedAt': retrieved_at} for item in diagnostics)
     if not rows:
         raise TmonError('insufficient-minute-bars', '완료 분봉이 없습니다.')
     fresh((timestamp(rows[-1]['timestamp']) + timedelta(minutes=1)).isoformat(), now, settings['minuteSeconds'])

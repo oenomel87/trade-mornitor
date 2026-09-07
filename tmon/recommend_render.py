@@ -10,7 +10,7 @@ def render_recommend(data, meta, table):
     print(('당일매매' if meta['horizon'] == 'day' else '2~5거래일 매매') + ' · ' + meta['strategyVersion'])
     print('후보군 %d개 · 추천 %d개 · 토스 제공 시세 기준 (KRX·NXT 구분 없이 사용)' % (meta.get('universeCount',0),len(data)))
     if not data:
-        print(reasons.get(meta.get('outcomeReason'),'추천 후보가 없습니다.'))
+        print(clean(meta.get('outcomeExplanation') or reasons.get(meta.get('outcomeReason'),'추천 후보가 없습니다.')))
     else:
         table(['#','종목','이름','진입 기준','무효화','가격 위험 %','거래량 배수'],
               [[r['rank'],r['symbol'],clean(r['name']),r['entryReference'],r['invalidation'],r['riskPct'],r['volumeRatio']] for r in data])
@@ -35,7 +35,23 @@ def render_recommend(data, meta, table):
             print('출처 [%s] %s · %s · %s' % (clean(s['id']),clean(s['title']),s['publishedAt'] or '게시 시각 미확인',clean(s['url'])))
         for reason in r['limitations']:
             print('참고: '+clean(reason))
-    if meta.get('excludedCounts'):
+    summary = meta.get('evaluationSummary')
+    if summary:
+        screen = summary['screening']
+        print('초기 평가 %d개 · 통과 %d개 · 조건·대상 미충족 %d개 · 데이터 판단 불가 %d개 · 미평가 %d개' %
+              (screen['evaluatedCount'], screen['passedCount'], screen['conditionExcludedCount'],
+               screen['dataUnavailableCount'], summary['notEvaluatedCount']))
+        for label, rows in (('조건·대상 미충족', screen['conditionReasons']),
+                            ('데이터 판단 불가', screen['dataReasons']),
+                            ('미평가', summary['notEvaluatedReasons'])):
+            if rows:
+                print(label + ': ' + ', '.join(clean(r['label']) + ' %d개' % r['count'] for r in rows))
+        for row in summary['laterExclusions']:
+            print('후속 제외: %s · %s · %s' % (clean(row['symbol']), clean(row['stage']),
+                  clean(row.get('message') or row['reason'])))
+        for row in summary['finalNotEvaluated']:
+            print('최종 검증 미평가: %s · 시간 예산 초과' % clean(row['symbol']))
+    elif meta.get('excludedCounts'):
         print('제외: '+', '.join(clean(k)+' '+str(v) for k,v in meta['excludedCounts'].items()))
     if meta.get('recordPath'):
         print('실행 기록: '+meta['recordPath'])

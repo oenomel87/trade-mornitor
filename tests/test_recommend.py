@@ -158,6 +158,34 @@ class ConfigTests(unittest.TestCase):
 
 
 class DataTests(unittest.TestCase):
+    def test_next_boundary_is_excluded_without_changing_completed_bars(self):
+        for second in (0, 5, 36, 59):
+            now = NOW.replace(second=second)
+            boundary = now.replace(second=0) + timedelta(minutes=1)
+            warnings = []
+            baseline = completed_minutes({'candles': minutes()}, now, START)
+            rows = completed_minutes({'candles': [candle(boundary)] + minutes()}, now, START,
+                                     warnings=warnings)
+            self.assertEqual(rows, baseline)
+            self.assertEqual(warnings[0]['code'], 'future-minute-bar-skipped')
+            self.assertEqual(warnings[0]['barTimestamp'], boundary.isoformat())
+
+    def test_distant_future_remains_an_error(self):
+        future = NOW.replace(second=0) + timedelta(minutes=2)
+        with self.assertRaises(TmonError) as caught:
+            completed_minutes({'candles': minutes() + [candle(future)]}, NOW, START)
+        self.assertEqual(caught.exception.code, 'future-minute-bar')
+        self.assertEqual(caught.exception.details['barTimestamp'], future.isoformat())
+
+    def test_future_skip_does_not_fill_missing_bars_or_relax_completion(self):
+        boundary = NOW.replace(second=0) + timedelta(minutes=1)
+        now = NOW.replace(second=4)
+        rows = completed_minutes({'candles': minutes() + [candle(boundary)]}, now, START)
+        self.assertEqual(len(rows), 59)
+        self.assertEqual(len(five_minutes(rows, START)), 11)
+        rows = completed_minutes({'candles': minutes()[:-1] + [candle(boundary)]}, NOW, START)
+        self.assertEqual(len(five_minutes(rows, START)), 11)
+
     def test_incomplete_bar_and_aggregation(self):
         raw={'candles':minutes()+[candle(NOW.replace(second=0))]}
         rows=completed_minutes(raw,NOW,START)
@@ -243,6 +271,31 @@ class StrategyTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def test_future_bar_policy_and_diagnostics_end_to_end(self):
+        class FutureClient(FakeClient):
+            offset = 1
+            def get(self, path, **params):
+                raw = super().get(path, **params)
+                if path.endswith('/candles') and params.get('interval') == '1m':
+                    raw['candles'].insert(0, candle(NOW.replace(second=0) + timedelta(minutes=self.offset)))
+                return raw
+        client = FutureClient()
+        code, result, engine = self.run_engine(client)
+        self.assertEqual(code, 0)
+        self.assertEqual(result['meta']['outcomeReason'], 'recommended')
+        warnings = [w for w in result['warnings'] if w['code'] == 'future-minute-bar-skipped']
+        self.assertEqual(len(warnings), 2)  # Screening and final verification.
+        self.assertEqual(warnings[0]['symbol'], '000001')
+        self.assertEqual(warnings[0]['retrievedAt'], NOW.isoformat())
+        client.offset = 2
+        code, result, engine = self.run_engine(client)
+        self.assertEqual(code, 5)
+        excluded = result['meta']['excluded'][0]
+        self.assertEqual(excluded['reason'], 'future-minute-bar')
+        self.assertIn('미래 분봉', excluded['message'])
+        self.assertEqual(excluded['retrievedAt'], NOW.isoformat())
+        self.assertIn('barTimestamp', excluded)
+
     def run_engine(self,client=None,researcher=research,horizon='day',config=None):
         with tempfile.TemporaryDirectory() as td:
             e=Engine(config or load_config(research='off'),horizon,3,client or FakeClient(),Store(Path(td).resolve()),now=lambda:NOW,researcher=researcher)

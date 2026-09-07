@@ -15,6 +15,7 @@ from .recommend_config import load_config, config_hash
 from .recommend_data import (RecordingClient, daily_data, minute_data, current_data,
                              relative_return, stock_info, VENUE_SCOPE)
 from .recommend_store import Store
+from .recommend_summary import summarize
 from .research import research
 from .strategies import VERSION, NoMatch, signal, entry, sort_key
 
@@ -37,6 +38,7 @@ class Engine:
         self.phase_times = {}
         self.daily = {}
         self.index_cache = {}
+        self.warnings = []
 
     def phase(self, end):
         self.phase_end = min(end, self.deadline)
@@ -59,7 +61,8 @@ class Engine:
     def reject(self, symbol, error, stage):
         is_match = isinstance(error, NoMatch)
         self.inputs['excluded'].append({'symbol':symbol,'reason':error.code,'stage':stage,
-                                       'kind':'condition' if is_match else 'data'})
+                                       'kind':'condition' if is_match else 'data',
+                                       'message':error.message, **getattr(error, 'details', {})})
         if not is_match:
             self.partial = True
         if error.exit_code == 3:
@@ -103,7 +106,7 @@ class Engine:
         daily = self.daily[sym]
         mins, five = ([], [])
         if self.horizon == 'day':
-            mins, five = minute_data(self.client,sym,sess,self.now(),self.config['freshness'])
+            mins, five = minute_data(self.client,sym,sess,self.now(),self.config['freshness'],self.warnings)
         sig = signal(daily,five,self.horizon,self.config[self.horizon],self.now())
         stock, price, book, upper, state_at = current_data(self.client,sym,self.config['freshness'],self.now)
         row = {**stock, **entry(sig,book,price['lastPrice'],upper,self.horizon,self.config),
@@ -154,6 +157,7 @@ class Engine:
             return None, None
 
     def run(self, result):
+        self.warnings = result['warnings']
         meta = result['meta']
         meta.update(runId=uuid.uuid4().hex, recommendSchemaVersion=1, horizon=self.horizon,
                     strategyVersion=VERSION, effectiveConfig=self.config, configHash=config_hash(self.config),
@@ -174,6 +178,7 @@ class Engine:
                     timings=self.phase_times, universeCount=len(self.inputs['candidates']),
                     excluded=self.inputs['excluded'], notEvaluated=self.inputs['notEvaluated'],
                     excludedCounts=dict(Counter(r['reason'] for r in self.inputs['excluded'])))
+        summarize(result)
         try:
             self.store.save(result,self.inputs)
         except OSError:
@@ -202,6 +207,7 @@ class Engine:
                 candidates.append(self.evaluate(sym,cal,sess))
             except TmonError as e:
                 self.reject(sym,e,'screen')
+        result['meta']['quantitativePassCount'] = len(candidates)
         review_date, exit_by = self.holding_dates(cal) if candidates else (None,None)
         self.phase_times['dataSeconds'] = round(self.clock()-self.started,3)
         if not candidates:
@@ -214,7 +220,6 @@ class Engine:
             return 5 if self.partial else 0
         candidates.sort(key=sort_key)
         shortlist = candidates[:self.config['universe']['researchLimit']]
-        result['meta']['quantitativePassCount'] = len(candidates)
         research_start = self.clock()
         budget = self.config['budget']
         available = max(0,min(budget['researchSeconds'], self.deadline-budget['finalSeconds']-self.clock()))
