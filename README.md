@@ -242,3 +242,4 @@ python3 -m unittest discover -v
 - [국내 단기매매 후보 추천 설계](docs/design/recommend.md) — 당일·2~5거래일 후보와 Codex 웹 조사
 - [구조·확장 계획](docs/design/architecture-and-roadmap.md)
 - [구현 검증 기록](docs/implementation-verification.md)
+- [정기 시황·추천 알림 사용 가이드](docs/alerts.md)
