@@ -103,6 +103,8 @@ def generate(args, result, client, store, researcher, now, clock, started, asof,
         recording = RecordingClient(client, now)
         raw = recording.get('/api/v1/market-calendar/KR', date=asof.date().isoformat())
         context = calendar_context(raw, asof, args.session)
+        # ``asof`` is the briefing start instant. Each market read below uses
+        # its RecordingClient receipt when evaluating freshness or completion.
         data, identities = collect(recording, context, asof, selected, warnings)
     except TmonError as e:
         warnings.append({'code': e.code, 'message': '시장 데이터: ' + e.message})
@@ -130,6 +132,8 @@ def generate(args, result, client, store, researcher, now, clock, started, asof,
             final_now = now().astimezone(market_zone('KRW'))
             fresh_cal = final.get('/api/v1/market-calendar/KR', date=final_now.date().isoformat())
             final_context = calendar_context(fresh_cal, final_now, args.session)
+            # The refreshed context is anchored at the refresh start, while
+            # collect() still evaluates every response at its own receipt.
             final_warnings = []
             final_data, _ = collect(final, final_context, final_now, selected, final_warnings)
             # A failed refresh must not erase the last successfully observed data.
@@ -159,7 +163,7 @@ def generate(args, result, client, store, researcher, now, clock, started, asof,
             row['freshness'] = 'unknown'
         if row['freshness'] in ('unknown', 'stale') and not any(w['code'] == 'brief-stale-data' for w in warnings):
             warnings.append({'code': 'brief-stale-data', 'message': '출력 시점에 오래되거나 시각을 확인할 수 없는 시장 자료가 있습니다.'})
-    market_failed = bool([w for w in warnings if w['code'] not in ('brief-profile-limit', 'fewer-ranking-results', 'brief-storage-unavailable')])
+    market_failed = bool([w for w in warnings if w['code'] not in ('brief-profile-limit', 'fewer-ranking-results', 'brief-storage-unavailable', 'future-minute-bar-skipped')])
     if args.session != 'auto' and args.session != context['phase']:
         warnings.append({'code': 'brief-session-mismatch', 'message': '요청한 브리핑 유형과 실제 장 상태가 다릅니다. 자료 기준은 실제 장 상태를 따릅니다.'})
     if narrative['status'] == 'unavailable':

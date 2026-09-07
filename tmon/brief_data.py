@@ -3,8 +3,25 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from .errors import TmonError, invalid_data
-from .market import decimal, market_zone, normalize_candle, timestamp, quote
+from .market import decimal, market_zone, timestamp, quote
 from .ranking import rank
+
+
+def _response_received_at(client, fallback):
+    """Return the receipt instant for the most recent logical API read.
+
+    ``fallback`` keeps the standalone helpers compatible with simple test
+    clients and callers that do not use ``RecordingClient``.  Briefing
+    collection wraps real clients in ``RecordingClient``, whose receipt marks
+    are the clock for response freshness and completed-bar evaluation.
+    """
+    records = getattr(client, 'records', None)
+    if not isinstance(records, list) or not records:
+        return fallback
+    try:
+        return timestamp(records[-1]['receivedAt'])
+    except (KeyError, TypeError, TmonError):
+        return fallback
 
 
 def kst(value):
@@ -53,6 +70,7 @@ def freshness(value, context, now):
 
 def index_prices(client, context, now):
     raw = client.get('/api/v1/market-indicators/prices', symbols='KOSPI,KOSDAQ')
+    received_at = _response_received_at(client, now)
     if not isinstance(raw, list):
         raise invalid_data()
     rows, seen = [], set()
@@ -64,7 +82,7 @@ def index_prices(client, context, now):
             seen.add(sym)
             value = item.get('timestamp')
             rows.append({'symbol': sym, 'lastPrice': decimal(item['lastPrice']), 'unit': 'point',
-                         'asOf': kst(value) if value else None, 'freshness': freshness(value, context, now),
+                         'asOf': kst(value) if value else None, 'freshness': freshness(value, context, received_at),
                          'priceBasis': 'provider-quote', 'timeBasis': 'provider-quote', 'providerLastPrice': decimal(item['lastPrice']),
                          'providerAsOf': kst(value) if value else None,
                          'changePct': None, 'baseDate': None, 'basePrice': None})
@@ -75,25 +93,24 @@ def index_prices(client, context, now):
     return rows
 
 
-def dated_index_fallback(client, row, context, now):
+def dated_index_fallback(client, row, context, now, warnings=None):
     """Use a separately dated completed minute close, never timestamp an undated quote."""
     raw = client.get('/api/v1/market-indicators/' + row['symbol'] + '/candles', interval='1m', count=5)
+    received_at = _response_received_at(client, now)
     try:
-        bars = {}
-        for item in raw['candles']:
-            instant, candle = normalize_candle({**item, 'currency': 'KRW'}, 'KRW')
-            if instant.second or instant.microsecond or instant > now + timedelta(seconds=5):
-                raise invalid_data()
-            if instant in bars and bars[instant] != candle:
-                raise invalid_data()
-            if instant + timedelta(minutes=1, seconds=5) <= now:
-                bars[instant] = candle
+        from .recommend_data import completed_index_minutes
+        notes = []
+        try:
+            bars = completed_index_minutes(raw, received_at, received_at, None, 5,
+                                           None, None, warnings=notes)
+        finally:
+            if warnings is not None:
+                warnings.extend({**note, 'symbol': row['symbol']} for note in notes)
         if not bars:
             raise invalid_data('시각을 확인할 수 있는 완료 지수 분봉이 없습니다.')
-        instant = max(bars)
-        stamp = instant.isoformat()
-        row.update(lastPrice=bars[instant]['closePrice'], asOf=kst(stamp),
-                   freshness=freshness(stamp, context, now), priceBasis='completed-minute-close', timeBasis='bar-start')
+        stamp = bars[-1]['timestamp']
+        row.update(lastPrice=bars[-1]['closePrice'], asOf=kst(stamp),
+                   freshness=freshness(stamp, context, received_at), priceBasis='completed-minute-close', timeBasis='bar-start')
     except (KeyError, TypeError):
         raise invalid_data() from None
 
@@ -106,11 +123,13 @@ def index_change(client, row, now):
     context = calendar_context(cal, timestamp(row['asOf']))
     expected = context['previousBusinessDay']
     raw = client.get('/api/v1/market-indicators/' + row['symbol'] + '/candles', interval='1d', count=10)
+    received_at = _response_received_at(client, now)
     try:
+        from .recommend_data import normalize_index_candle
         matches = []
         for item in raw['candles']:
-            instant, candle = normalize_candle({**item, 'currency': 'KRW'}, 'KRW')
-            if instant > now:
+            instant, candle = normalize_index_candle(item)
+            if instant > received_at:
                 raise invalid_data()
             if candle['date'] == expected:
                 matches.append(candle)
@@ -125,6 +144,7 @@ def index_change(client, row, now):
 def investor_flow(client, symbol, context, now):
     raw = client.get('/api/v1/market-indicators/' + symbol + '/investor-trading',
                      interval='1d', count=1, until=context['referenceDate'])
+    received_at = _response_received_at(client, now)
     try:
         records = raw['records']
         if not isinstance(records, list) or len(records) != 1:
@@ -144,7 +164,7 @@ def investor_flow(client, symbol, context, now):
             net[who] = buy - sell
         if sum(buys) != sum(sells):
             raise invalid_data('투자자별 매수·매도 합계가 일치하지 않습니다.')
-        state = freshness(r['updatedAt'], context, now)
+        state = freshness(r['updatedAt'], context, received_at)
         if r['date'] != context['referenceDate']:
             state = 'stale'
         return {'symbol': symbol, 'date': r['date'], 'asOf': kst(r['updatedAt']), 'freshness': state,
@@ -160,13 +180,18 @@ def collect(client, context, now, symbols, warnings):
         try:
             return action()
         except TmonError as e:
-            warnings.append({'code': e.code, 'message': label + ': ' + e.message})
+            warning = {'code': e.code, 'message': label + ': ' + e.message}
+            details = getattr(e, 'details', {})
+            if isinstance(details, dict):
+                warning.update({key: value for key, value in details.items()
+                                if key not in ('code', 'message')})
+            warnings.append(warning)
         return None
 
     data['indices'] = attempt('국내 지수', lambda: index_prices(client, context, now)) or []
     for row in data['indices']:
         if row['asOf'] is None:
-            attempt(row['symbol'] + ' 완료 분봉', lambda: dated_index_fallback(client, row, context, now))
+            attempt(row['symbol'] + ' 완료 분봉', lambda: dated_index_fallback(client, row, context, now, warnings))
         attempt(row['symbol'] + ' 등락률', lambda: index_change(client, row, now))
     for sym in ('KOSPI', 'KOSDAQ'):
         row = attempt(sym + ' 수급', lambda: investor_flow(client, sym, context, now))
@@ -178,7 +203,8 @@ def collect(client, context, now, symbols, warnings):
             rows, meta, notes, _ = ranked
             warnings.extend(notes)
             stamp = meta['rankedAt']
-            state = attempt(metric + ' 집계 시각', lambda: freshness(stamp, context, now))
+            received_at = _response_received_at(client, now)
+            state = attempt(metric + ' 집계 시각', lambda: freshness(stamp, context, received_at))
             if state is None:
                 continue
             data['rankings'].append({'by': metric, 'asOf': kst(stamp) if stamp else None,
@@ -189,10 +215,11 @@ def collect(client, context, now, symbols, warnings):
         if quoted:
             rows, _, notes, _ = quoted
             warnings.extend(notes)
+            received_at = _response_received_at(client, now)
             for row in rows:
                 # US watchlist quotes retain their own market date and never inherit KR freshness.
                 row['timestamp'] = kst(row['timestamp'])
-                row['freshness'] = (attempt(row['symbol'] + ' 시각', lambda: freshness(row['timestamp'], context, now))
+                row['freshness'] = (attempt(row['symbol'] + ' 시각', lambda: freshness(row['timestamp'], context, received_at))
                                     if row['currency'] == 'KRW' else 'dated-snapshot') or 'unknown'
             data['watchlist'] = rows
     all_symbols = list(dict.fromkeys(symbols + [r['symbol'] for g in data['rankings'] for r in g['rows']]))

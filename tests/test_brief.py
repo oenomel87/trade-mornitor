@@ -19,6 +19,7 @@ from tmon.brief_store import BriefStore, scope_key
 from tmon.client import endpoint_group
 from tmon.errors import TmonError
 from tmon.watchlist import Watchlist
+from tmon.recommend_data import RecordingClient
 from tests.test_recommend import NOW, cal, candle
 
 
@@ -129,6 +130,89 @@ class BriefTests(unittest.TestCase):
         self.assertEqual(row['priceBasis'], 'completed-minute-close')
         self.assertEqual(row['asOf'], (NOW.replace(second=0) - timedelta(minutes=1)).isoformat())
         self.assertEqual(row['timeBasis'], 'bar-start')
+
+    def test_index_next_boundary_skipped_but_distant_future_rejected(self):
+        for offset in (1, 2):
+            row = {'symbol': 'KOSPI', 'lastPrice': D('110'), 'providerLastPrice': D('110'), 'providerAsOf': None}
+            client = MagicMock()
+            client.get.return_value = {'candles': [
+                candle(NOW.replace(second=0) + timedelta(minutes=offset), '120', '119', '121'),
+                candle(NOW.replace(second=0) - timedelta(minutes=1), '105', '104', '106')]}
+            warnings = []
+            if offset == 2:
+                with self.assertRaises(TmonError) as caught:
+                    dated_index_fallback(client, row, calendar_context(cal(), NOW), NOW, warnings)
+                self.assertEqual(caught.exception.code, 'future-minute-bar')
+                self.assertEqual(row['lastPrice'], D('110'))
+            else:
+                dated_index_fallback(client, row, calendar_context(cal(), NOW), NOW, warnings)
+                self.assertEqual(row['lastPrice'], D('105'))
+                self.assertEqual(warnings[0]['symbol'], 'KOSPI')
+                self.assertEqual(warnings[0]['code'], 'future-minute-bar-skipped')
+
+    def test_fallback_uses_recorded_receipt_for_completion_and_future_boundary(self):
+        asof = NOW.replace(second=59)
+        receipt = asof + timedelta(seconds=6)
+        wall = [asof]
+
+        class AdvancingClient:
+            def get(self, path, **params):
+                wall[0] = receipt
+                return {'candles': [
+                    candle(asof.replace(second=0) + timedelta(minutes=2), '130', '129', '131'),
+                    candle(asof.replace(second=0), '120', '119', '121'),
+                    candle(asof.replace(second=0) - timedelta(minutes=1), '105', '104', '106')]}
+
+        client = RecordingClient(AdvancingClient(), now=lambda: wall[0])
+        row = {'symbol': 'KOSPI', 'lastPrice': D('110'),
+               'providerLastPrice': D('110'), 'providerAsOf': None}
+        warnings = []
+        dated_index_fallback(client, row, calendar_context(cal(), asof), asof, warnings)
+        self.assertEqual(client.records[-1]['receivedAt'], receipt.isoformat())
+        self.assertEqual(row['lastPrice'], D('120'))
+        self.assertEqual(row['asOf'], asof.replace(second=0).isoformat())
+        self.assertEqual(row['providerLastPrice'], D('110'))
+        self.assertEqual(warnings[0]['code'], 'future-minute-bar-skipped')
+
+    def test_fallback_without_completed_bars_keeps_provider_observation_and_fails(self):
+        asof = NOW.replace(second=59)
+        receipt = asof + timedelta(seconds=6)
+        wall = [asof]
+
+        class FutureOnlyClient:
+            def get(self, path, **params):
+                wall[0] = receipt
+                return {'candles': [candle(asof.replace(second=0) + timedelta(minutes=2))]}
+
+        client = RecordingClient(FutureOnlyClient(), now=lambda: wall[0])
+        row = {'symbol': 'KOSPI', 'lastPrice': D('110'),
+               'providerLastPrice': D('110'), 'providerAsOf': None}
+        warnings = []
+        with self.assertRaises(TmonError) as caught:
+            dated_index_fallback(client, row, calendar_context(cal(), asof), asof, warnings)
+        self.assertEqual(caught.exception.code, 'invalid-data')
+        self.assertEqual(row['lastPrice'], D('110'))
+        self.assertEqual(row['providerLastPrice'], D('110'))
+        self.assertEqual(warnings[0]['code'], 'future-minute-bar-skipped')
+
+    def test_future_skip_warning_alone_does_not_make_brief_partial(self):
+        class IndexClient(Client):
+            def get(self, path, **params):
+                raw = super().get(path, **params)
+                if path.endswith('/prices') and 'market-indicators' in path:
+                    for row in raw:
+                        row['timestamp'] = None
+                if path.endswith('/candles') and params.get('interval') == '1m':
+                    raw = {'candles': [candle(NOW.replace(second=0) + timedelta(minutes=1)),
+                                       candle(NOW.replace(second=0) - timedelta(minutes=1))]}
+                return raw
+        code, result = self.run_brief(client=IndexClient())
+        self.assertEqual(code, 0)
+        self.assertEqual(result['status'], 'ok')
+        self.assertIn('future-minute-bar-skipped', [w['code'] for w in result['warnings']])
+        for row in result['data']['market']['indices']:
+            self.assertEqual(row['priceBasis'], 'completed-minute-close')
+            self.assertIsNotNone(row['changePct'])
 
     def test_turnover_is_one_sided_and_net_is_signed(self):
         flow = investor_flow(Client(), 'KOSPI', calendar_context(cal(), NOW), NOW)
@@ -261,6 +345,95 @@ class BriefTests(unittest.TestCase):
         self.assertTrue(result['meta']['marketRefreshed'])
         self.assertEqual(result['data']['market']['indices'][0]['lastPrice'], D('115'))
         self.assertEqual(sum(p == '/api/v1/market-indicators/prices' for p, _ in client.calls), 2)
+
+    def test_receipt_clock_applies_to_initial_fallback(self):
+        asof = NOW.replace(second=59)
+        receipt = asof + timedelta(seconds=6)
+        wall = [asof]
+
+        class AdvancingIndexClient(Client):
+            def get(self, path, **params):
+                if path.endswith('/prices') and 'market-indicators' in path:
+                    raw = super().get(path, **params)
+                    wall[0] = receipt
+                    for row in raw:
+                        row['timestamp'] = None
+                    return raw
+                if path.endswith('/candles') and params.get('interval') == '1m':
+                    self.calls.append((path, params))
+                    return {'candles': [
+                        candle(asof.replace(second=0) + timedelta(minutes=2), '130', '129', '131'),
+                        candle(asof.replace(second=0), '120', '119', '121')]}
+                return super().get(path, **params)
+
+        client = AdvancingIndexClient()
+        code, result = self.run_brief(client=client, now=lambda: wall[0])
+        self.assertEqual(code, 0)
+        self.assertEqual(result['status'], 'ok')
+        self.assertFalse(result['meta']['marketRefreshed'])
+        self.assertEqual(result['meta']['queriedAt'], asof.isoformat())
+        self.assertEqual(result['data']['market']['indices'][0]['lastPrice'], D('120'))
+        self.assertEqual(result['data']['market']['indices'][0]['asOf'], asof.replace(second=0).isoformat())
+        self.assertEqual(result['data']['market']['indices'][0]['providerLastPrice'], D('110'))
+        skips = [w for w in result['warnings'] if w['code'] == 'future-minute-bar-skipped']
+        self.assertEqual(len(skips), 2)
+        self.assertTrue(all(w['evaluatedAt'] == receipt.isoformat() for w in skips))
+        self.assertEqual(sum(path.endswith('/prices') for path, _ in client.calls), 1)
+        self.assertEqual(sum(params.get('interval') == '1m' for _, params in client.calls), 2)
+
+    def test_receipt_clock_applies_to_final_refresh_fallback(self):
+        asof = NOW.replace(second=59)
+        final_start = asof + timedelta(minutes=1)
+        final_receipt = final_start + timedelta(seconds=6)
+        wall = [asof]
+        elapsed = [0]
+
+        class AdvancingIndexClient(Client):
+            def __init__(self):
+                super().__init__()
+                self.price_calls = 0
+
+            def get(self, path, **params):
+                if path.endswith('/prices') and 'market-indicators' in path:
+                    self.price_calls += 1
+                    raw = super().get(path, **params)
+                    if self.price_calls == 2:
+                        # The final request starts at 10:01:59 and is received
+                        # at 10:02:05, crossing a minute boundary itself.
+                        wall[0] = final_receipt
+                        for row in raw:
+                            row['timestamp'] = None
+                    return raw
+                if path.endswith('/candles') and params.get('interval') == '1m':
+                    self.calls.append((path, params))
+                    anchor = final_start.replace(second=0)
+                    return {'candles': [
+                        candle(anchor + timedelta(minutes=2), '130', '129', '131'),
+                        candle(anchor, '120', '119', '121'),
+                        candle(anchor - timedelta(minutes=1), '105', '104', '106')]}
+                return super().get(path, **params)
+
+        client = AdvancingIndexClient()
+
+        def slow_research(*args, **kwargs):
+            elapsed[0] = 45
+            wall[0] = final_start
+            return story(), {'cacheHit': False}
+
+        code, result = self.run_brief(client=client, researcher=slow_research,
+                                      clock=lambda: elapsed[0], now=lambda: wall[0])
+        self.assertEqual(code, 0)
+        self.assertEqual(result['status'], 'ok')
+        self.assertTrue(result['meta']['marketRefreshed'])
+        self.assertEqual(result['meta']['queriedAt'], asof.isoformat())
+        self.assertEqual(result['data']['market']['indices'][0]['lastPrice'], D('120'))
+        self.assertEqual(result['data']['market']['indices'][0]['asOf'], final_start.replace(second=0).isoformat())
+        self.assertEqual(result['data']['market']['indices'][0]['providerLastPrice'], D('110'))
+        skips = [w for w in result['warnings'] if w['code'] == 'future-minute-bar-skipped']
+        self.assertEqual(len(skips), 2)
+        self.assertTrue(all(w['evaluatedAt'] == final_receipt.isoformat() for w in skips))
+        self.assertEqual(sum(path.endswith('/prices') for path, _ in client.calls), 2)
+        self.assertEqual(sum(params.get('interval') == '1m' for _, params in client.calls), 2)
 
     def test_failed_final_refresh_keeps_last_observations(self):
         elapsed = [0]
