@@ -1,6 +1,8 @@
 import argparse
+import contextlib
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
+import io
 import json
 import sys
 import unicodedata
@@ -104,19 +106,25 @@ def serialize(value):
     raise TypeError("unsupported output type")
 
 
+def serialize_result(value):
+    """Use one JSON boundary for the CLI and private recommendation records."""
+    return json.loads(json.dumps(value, default=serialize, ensure_ascii=False,
+                                 allow_nan=False))
+
+
 def envelope(command):
     return {"schemaVersion": 1, "command": command, "status": "ok", "data": None,
             "meta": {"queriedAt": datetime.now(timezone.utc).isoformat(), "source": "Toss Securities Open API"},
             "warnings": [], "error": None}
 
 
-def run(args, result):
+def run(args, result, engine_holder=None):
     if args.command == "brief":
         from .brief import run_brief
         return run_brief(args, result)
     if args.command == "recommend":
         from .recommend import run_recommend
-        return run_recommend(args, result)
+        return run_recommend(args, result, engine_holder=engine_holder)
     if args.command == "profile":
         store = Watchlist()
         result["meta"].update(source="local", action=args.action, watchlistFile=str(store.path))
@@ -216,7 +224,7 @@ def table(headers, rows):
 
 def render(result, json_mode):
     # Same quantization for both output formats.
-    result = json.loads(json.dumps(result, default=serialize, ensure_ascii=False))
+    result = serialize_result(result)
     if json_mode:
         print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
         return
@@ -303,13 +311,22 @@ def render(result, json_mode):
         print("안내 [%s]: %s" % (warning["code"], warning["message"]), file=sys.stderr)
 
 
+def render_text(result, json_mode):
+    """Render into buffers so recommendation expiry is checked before emit."""
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        render(result, json_mode)
+    return stdout.getvalue(), stderr.getvalue()
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     command = next((arg for arg in argv if arg in ("doctor", "quote", "history", "analyze", "search", "rank", "watchlist", "profile", "recommend", "brief")), None)
     result = envelope(command)
+    engine_holder = {}
     try:
         args = parser().parse_args(argv)
-        code = run(args, result)
+        code = run(args, result, engine_holder=engine_holder)
     except TmonError as error:
         result.update(status="error", data=None, error=error.as_dict())
         code = error.exit_code
@@ -320,7 +337,38 @@ def main(argv=None):
         result.update(status="error", data=None, error=TmonError("internal-error", "예상하지 못한 내부 오류입니다.", 1).as_dict())
         code = 1
     try:
-        render(result, "--json" in argv)
+        if command == "recommend" and result.get("status") != "error":
+            # Engine.run saves once before returning.  The short-lived holder
+            # lets the actual CLI path apply the same final output boundary
+            # after complete render serialization, immediately before write.
+            from .recommend import discard_cli_engine, finalize_cli_result
+            output, diagnostics = render_text(result, "--json" in argv)
+            initial_count = len(result.get("data") or [])
+            stable = False
+            for _ in range(initial_count + 1):
+                changed, retry_code = finalize_cli_result(result, engine_holder.get("engine"))
+                if retry_code > code:
+                    code = retry_code
+                if not changed:
+                    stable = True
+                    break
+                output, diagnostics = render_text(result, "--json" in argv)
+            if not stable:
+                # A pathological serializer that advances the clock on every
+                # pass cannot keep stale rows alive indefinitely. The final
+                # bounded result is an empty, persisted record.
+                changed, retry_code = finalize_cli_result(result, engine_holder.get("engine"),
+                                                          force_empty=True)
+                if retry_code > code:
+                    code = retry_code
+                output, diagnostics = render_text(result, "--json" in argv)
+            sys.stdout.write(output)
+            sys.stderr.write(diagnostics)
+            discard_cli_engine(engine_holder)
+        else:
+            render(result, "--json" in argv)
     except BrokenPipeError:
+        engine_holder.clear()
         return 0
+    engine_holder.clear()
     return code

@@ -124,7 +124,14 @@ def normalize_candle(item, currency):
         raise invalid_data() from None
 
 
-def history(client, symbol, count, adjusted=True, now=None):
+def history(client, symbol, count, adjusted=True, now=None, *, check_budget=None):
+    """Read completed daily candles, optionally checking budget per page.
+
+    The callback is deliberately invoked immediately before every candle page
+    request.  A ``None`` return (the ``Engine.check_budget`` contract) and a
+    truthy return both allow the request.  Callback exceptions, including
+    authentication and budget ``TmonError`` values, are propagated unchanged.
+    """
     now = now or datetime.now(timezone.utc)
     candles, cursor, seen_cursors = {}, None, set()
     currency, cutoff = None, None
@@ -133,6 +140,10 @@ def history(client, symbol, count, adjusted=True, now=None):
     excluded = set()
     pages = 0
     for _ in range(3):
+        if check_budget is not None:
+            allowed = check_budget()
+            if allowed is False:
+                raise TmonError("recommend-budget", "추천 단계의 시간 예산을 초과했습니다.", 4)
         params = {"symbol": symbol, "interval": "1d", "count": min(200, count + 2),
                   "adjusted": "true" if adjusted else "false"}
         if cursor is not None:

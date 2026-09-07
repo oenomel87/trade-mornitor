@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
 
-from .errors import TmonError, invalid_data
+from .errors import TmonError, invalid_data, safe_code
 
 HOST = "openapi.tossinvest.com"
 GROUPS = {
@@ -42,12 +42,25 @@ def endpoint_group(path):
 
 
 class Transport:
-    def __init__(self, budget=60):
-        self.deadline = time.monotonic() + budget
+    def __init__(self, budget=60, clock=None, sleeper=None, now=None):
+        # Injected monotonic clock drives budget/elapsed; injected aware now()
+        # drives observation timestamps. Defaults preserve live behavior.
+        self._clock = clock if clock is not None else time.monotonic
+        self._sleep = sleeper if sleeper is not None else time.sleep
+        self._now = now
+        self.deadline = self._clock() + budget
         self.ready_at = {}
+        # PR0 observations: one entry per request() call, success and failure.
+        # Never stores headers, bodies, tokens or raw provider messages.
+        self.observations = []
+
+    def _wall_now(self):
+        if self._now is not None:
+            return self._now()
+        return datetime.now(timezone.utc)
 
     def remaining(self):
-        remaining = self.deadline - time.monotonic()
+        remaining = self.deadline - self._clock()
         if remaining <= 0:
             raise TmonError("deadline-exceeded", "명령의 60초 네트워크 예산을 초과했습니다.", 4, True)
         return remaining
@@ -56,7 +69,7 @@ class Transport:
         seconds = max(0, seconds)
         if seconds >= self.remaining():
             raise TmonError("retry-budget-exceeded", "권장 재시도 대기시간이 명령 예산을 초과합니다.", 4, True)
-        time.sleep(seconds)
+        self._sleep(seconds)
 
     def send(self, method, path, headers, body=None):
         connection = http.client.HTTPSConnection(HOST, timeout=min(5, self.remaining()),
@@ -120,10 +133,50 @@ class Transport:
         return 2 ** attempt + random.uniform(0, 0.2)
 
     def request(self, method, path, params=None, token=None, form=None):
+        group = endpoint_group(path) or "AUTH"
+        started_wall = self._wall_now()
+        started_mono = self._clock()
+        rate_wait = 0.0
+        retry_wait = 0.0
+        attempts = 0
+        recorded = False
+
+        def observe(success, error_code=None):
+            nonlocal recorded
+            # Safe observation only: no headers, bodies, tokens or raw messages.
+            # The code is normalized; unsafe provider strings never persist.
+            recorded = True
+            ended_wall = self._wall_now()
+            elapsed = max(0.0, self._clock() - started_mono)
+            entry = {'requestStartedAt': started_wall.isoformat(),
+                     'receivedAt': ended_wall.isoformat(),
+                     'endpointGroup': group, 'path': path,
+                     'attemptCount': attempts,
+                     'rateLimitWaitSeconds': round(rate_wait, 3),
+                     'retryWaitSeconds': round(retry_wait, 3),
+                     'elapsedSeconds': round(elapsed, 3),
+                     'success': success, 'errorCode': safe_code(error_code) if not success else None}
+            self.observations.append(entry)
+            return entry
+
+        def metered(label, seconds):
+            # Measure ACTUAL waited time around pause, including refusal or
+            # interruption (which waits nothing). Never book planned delays.
+            nonlocal rate_wait, retry_wait
+            start = self._clock()
+            try:
+                self.pause(seconds)
+            finally:
+                actual = round(max(0.0, self._clock() - start), 3)
+                if label == 'rate':
+                    rate_wait += actual
+                else:
+                    retry_wait += actual
+
         if not ((method == "GET" and endpoint_group(path) is not None) or
                 (method == "POST" and path == "/oauth2/token")):
+            observe(False, "unsupported-endpoint")
             raise TmonError("unsupported-endpoint", "조회 CLI에서 허용하지 않는 API입니다.", 2)
-        group = endpoint_group(path) or "AUTH"
         url = path + ("?" + urlencode(params) if params else "")
         headers = {"Accept": "application/json", "User-Agent": "tmon/0.1"}
         if token:
@@ -132,29 +185,50 @@ class Transport:
         if form is not None:
             body = urlencode(form).encode()
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-        for attempt in range(3 if method == "GET" else 1):
-            wait = self.ready_at.get(group, 0) - time.monotonic()
-            if wait > 0:
-                self.pause(wait)
-            try:
-                status, response_headers, data = self.send(method, url, headers, body)
-            except TmonError as error:
-                if method == "GET" and error.code == "network-error" and attempt < 2:
-                    self.pause(self.retry_delay({}, attempt))
+        try:
+            for attempt in range(3 if method == "GET" else 1):
+                wait = self.ready_at.get(group, 0) - self._clock()
+                if wait > 0:
+                    metered('rate', wait)
+                attempts += 1
+                try:
+                    status, response_headers, data = self.send(method, url, headers, body)
+                except TmonError as error:
+                    if method == "GET" and error.code == "network-error" and attempt < 2:
+                        metered('retry', self.retry_delay({}, attempt))
+                        continue
+                    observe(False, error.code)
+                    raise
+                if response_headers.get("x-ratelimit-remaining") == "0":
+                    self.ready_at[group] = self._clock() + self.seconds(response_headers.get("x-ratelimit-reset"))
+                if group == "STOCK_ALL":
+                    self.ready_at[group] = max(self.ready_at.get(group, 0), self._clock() + 1)
+                if method == "GET" and (status == 429 or status in (500, 502, 503, 504)) and attempt < 2:
+                    metered('retry', self.retry_delay(response_headers, attempt))
                     continue
-                raise
-            if response_headers.get("x-ratelimit-remaining") == "0":
-                self.ready_at[group] = time.monotonic() + self.seconds(response_headers.get("x-ratelimit-reset"))
-            if group == "STOCK_ALL":
-                self.ready_at[group] = max(self.ready_at.get(group, 0), time.monotonic() + 1)
-            if method == "GET" and (status == 429 or status in (500, 502, 503, 504)) and attempt < 2:
-                self.pause(self.retry_delay(response_headers, attempt))
-                continue
-            if not 200 <= status < 300:
-                raise api_error(status, response_headers, data)
-            if not isinstance(data, dict):
-                raise invalid_data()
-            return data
+                if not 200 <= status < 300:
+                    error = api_error(status, response_headers, data)
+                    observe(False, error.code)
+                    raise error
+                if not isinstance(data, dict):
+                    observe(False, "invalid-data")
+                    raise invalid_data()
+                observe(True, None)
+                return data
+        except TmonError as error:
+            if not recorded:
+                observe(False, getattr(error, 'code', None))
+            raise
+        except KeyboardInterrupt:
+            # Interruption waits nothing beyond what was actually metered.
+            if not recorded:
+                observe(False, "interrupted")
+            raise
+        except Exception:
+            # Never record raw exception messages.
+            if not recorded:
+                observe(False, "internal-error")
+            raise TmonError("internal-error", "예상하지 못한 내부 오류입니다.", 1)
 
 
 def api_error(status, headers, data):

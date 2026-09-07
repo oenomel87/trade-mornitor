@@ -46,6 +46,7 @@ def write_json(path, value):
 class Store:
     def __init__(self, root=None):
         self.root = Path(root) if root is not None else root_directory()
+        self._owned_destinations = set()
 
     def save(self, result, inputs):
         runs = private_dir(self.root / 'runs')
@@ -53,12 +54,42 @@ class Store:
         temp = Path(tempfile.mkdtemp(prefix='.pending-', dir=runs))
         try:
             result['meta']['recordPath'] = str(destination / 'result.json')
-            from .cli import serialize
-            displayed = json.loads(json.dumps(result, default=serialize, ensure_ascii=False, allow_nan=False))
+            from .cli import serialize_result
+            displayed = serialize_result(result)
             write_json(temp / 'result.json', displayed)
             write_json(temp / 'inputs.json', inputs)
             write_json(temp / 'research.json', {r['symbol']: r['research'] for r in result['data'] or []})
-            os.rename(temp, destination)
+            # A second save can be needed when the first serialization/write
+            # crosses a result expiry boundary. Only a run saved by this Store
+            # instance may be replaced. Existing records from another process
+            # are left intact, and a failed swap restores this run's record.
+            destination_key = str(destination.absolute())
+            owned = destination_key in self._owned_destinations
+            if (destination.exists() or destination.is_symlink()) and not owned:
+                raise OSError('run destination already exists')
+            backup = None
+            if owned:
+                if destination.is_symlink() or not destination.is_dir():
+                    raise OSError('invalid existing run destination')
+                backup = Path(tempfile.mkdtemp(prefix='.previous-', dir=runs))
+                backup.rmdir()
+                try:
+                    os.rename(destination, backup)
+                    os.rename(temp, destination)
+                except OSError:
+                    if not destination.exists() and backup.exists():
+                        os.rename(backup, destination)
+                    raise
+                try:
+                    shutil.rmtree(backup)
+                except OSError:
+                    # The replacement is already visible. Retain the prior
+                    # complete run in its private backup when cleanup fails;
+                    # rolling back here could destroy a valid new result.
+                    pass
+            else:
+                os.rename(temp, destination)
+            self._owned_destinations.add(destination_key)
         finally:
             if temp.exists():
                 shutil.rmtree(temp)

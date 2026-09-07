@@ -10,11 +10,27 @@ from .errors import TmonError
 RESEARCH_MODEL = 'gpt-5.6-sol'
 RESEARCH_EFFORT = 'high'
 
+# These identifiers are part of effectiveConfig so a stored run says which
+# snapshot and calculation policies produced it.  They are intentionally
+# closed values: changing one requires a new policy version in code.
+POLICY_DEFAULTS = {
+    'strategyVersion': 'breakout-v1',
+    'recommendationPolicyVersion': 'snapshot-v2',
+    'signalPolicy': 'frozen-current-state-v2',
+    'fillModel': 'best-ask-visible-depth-v1',
+    'relativeReturnWindowPolicy': 'signal-aligned-v2',
+    'universePolicy': 'ranking-union-batch-prefilter-detail-limit-v1',
+}
+
 DEFAULTS = {
     'configVersion': 1, 'capital': None, 'maxLossPct': None, 'research': 'auto', 'model': RESEARCH_MODEL,
+    **POLICY_DEFAULTS,
     'universe': {'rankCount': 50, 'detailLimit': 30, 'researchLimit': 5},
     'day': {'minEstimatedAvgDailyAmount': '10000000000', 'maxSpreadPct': '0.30',
-            'minVolumeRatio': '1.5', 'maxBreakoutGapPct': '1.0'},
+            'minVolumeRatio': '1.5', 'maxBreakoutGapPct': '1.0',
+            # Initial frozen-signal lifetime policy.  Keep this an integer
+            # so it is explicit in effectiveConfig and JSON records.
+            'maxSignalAgeSeconds': 600},
     'swing': {'minEstimatedAvgDailyAmount': '10000000000', 'maxSpreadPct': '0.50',
               'minVolumeRatio': '1.5', 'maxBreakoutGapPct': '3.0'},
     'freshness': {'rankingSeconds': 120, 'quoteSeconds': 15, 'minuteSeconds': 120,
@@ -79,6 +95,8 @@ def load_config(path=None, *, capital=None, max_loss_pct=None, research=None, li
         c['model'] = RESEARCH_MODEL  # Compatibility with older configuration files.
     if c['model'] != RESEARCH_MODEL:
         raise bad()
+    if any(c.get(key) != value for key, value in POLICY_DEFAULTS.items()):
+        raise bad()
     for key in ('capital', 'maxLossPct'):
         if c[key] is not None:
             c[key] = str(positive(c[key]))
@@ -86,7 +104,14 @@ def load_config(path=None, *, capital=None, max_loss_pct=None, research=None, li
         raise bad()
     for horizon in ('day', 'swing'):
         for k, v in c[horizon].items():
-            c[horizon][k] = str(positive(v))
+            if horizon == 'day' and k == 'maxSignalAgeSeconds':
+                if type(v) is not int:
+                    raise bad()
+                if v <= 0 or v > 86400:
+                    raise bad()
+                c[horizon][k] = v
+            else:
+                c[horizon][k] = str(positive(v))
     for group in ('universe', 'freshness', 'budget'):
         for v in c[group].values():
             if type(v) is not int or not 1 <= v <= (100 if group == 'universe' else 3600):

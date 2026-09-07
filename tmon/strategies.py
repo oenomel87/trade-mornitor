@@ -11,8 +11,8 @@ VERSION = 'breakout-v1'
 
 
 class NoMatch(TmonError):
-    def __init__(self, code):
-        super().__init__(code, '전략 조건을 충족하지 않습니다.')
+    def __init__(self, code, message='전략 조건을 충족하지 않습니다.'):
+        super().__init__(code, message)
 
 
 def mean(values):
@@ -34,9 +34,10 @@ def signal(daily, five, horizon, settings, now):
             window = five[-6:]
             require_contiguous(window, 5)
             b, prev = window[-1], window[:-1]
-            # Last completed 5m bar must not be silently replaced by an older complete block.
-            if (now - timestamp(b['timestamp']) - timedelta(minutes=5)).total_seconds() >= 305:
-                raise TmonError('incomplete-bars', '최신 완료 5분봉이 없습니다.')
+            # PR1: fixed 305-second recency check removed. Completion
+            # (barEnd + D <= phaseStartedAt), frozen-window clipping
+            # (barEnd <= F) and latest-F presence are enforced in
+            # minute_data/Engine; signal() only validates shape here.
         else:
             b, prev = daily[-1], daily[-21:-1]
             sma20 = mean([r['closePrice'] for r in daily[-20:]])

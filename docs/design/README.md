@@ -16,6 +16,10 @@
 - [관심종목](./watchlist.md): 로컬 저장·삭제·목록·묶음 현재가
 - [관심종목 프로필](./watchlist-profiles.md): 프로필 생성·선택·분리 조회와 기존 목록 이전 (구현 완료)
 - [국내 단기매매 후보 추천](./recommend.md): 당일·2~5거래일 돌파 후보, Codex 웹 조사, 재검증과 실행 기록 (첫 구현 완료)
+- [추천 기능 최종 수정 작업 명세](./recommend-snapshot-v2-work-spec.md): PR0~PR4-B의 신호 고정·시각·지수·사전 필터·데이터 품질 변경과 인수 기준 (구현 완료)
+- [추천 수정 인터페이스 결정](./recommend-snapshot-v2-interfaces.md): Luna 구현에 적용한 시각·신호·검증 경계
+- [추천 수정 검증 결과](./recommend-snapshot-v2-validation.md): 저장소 회귀·통합 테스트와 검증 한계
+- [추천 수정 작업 로그](./recommend-snapshot-v2-work-log.md): 준비·OpenCode 실행·독립 검증·재작업 이력
 - [추천 기능 사용 가이드](../recommend.md): 실행 예제, 추천 조건, 결과 해석, 설정과 문제 해결
 - [구조와 확장 계획](./architecture-and-roadmap.md): 인증, API 호출, 모듈 경계, 구현 순서
 

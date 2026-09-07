@@ -17,12 +17,13 @@ from tmon.client import endpoint_group, TossClient, Transport
 from tmon.errors import TmonError
 from tmon.intraday import completed_minutes, five_minutes, fresh, session
 from tmon.recommend_config import load_config
-from tmon.recommend_data import orderbook, stock_info, warnings_ok
+from tmon.recommend_data import orderbook, stock_info, stock_eligibility, warnings_ok
 from tmon.recommend import Engine
 from tmon.recommend_render import render_recommend
 from tmon.recommend_store import Store
 from tmon.research import safe_env, validate, research, unavailable
 from tmon.strategies import signal, entry, NoMatch, sort_key
+from tests.recommend_calendar_fixture import calendar_for as fixture_calendar, daily_bars as fixture_daily_bars
 
 KST = timezone(timedelta(hours=9))
 NOW = datetime(2026,9,4,10,0,10,tzinfo=KST)
@@ -30,13 +31,7 @@ START = NOW.replace(hour=9,minute=0,second=0)
 
 
 def cal(now=NOW):
-    def day(d):
-        return {'date':d.date().isoformat(),'integrated':{'preMarket':None,'afterMarket':None,
-                'regularMarket':{'startTime':d.replace(hour=9,minute=0,second=0).isoformat(),
-                  'singlePriceAuctionStartTime':d.replace(hour=15,minute=20,second=0).isoformat(),
-                  'endTime':d.replace(hour=15,minute=30,second=0).isoformat()}}}
-    return {'today':day(now),'previousBusinessDay':day(now-timedelta(days=1)),
-            'nextBusinessDay':day(now+timedelta(days=3))}
+    return fixture_calendar(now)
 
 
 def candle(t, close='100', low='99', high='101', volume='100000000', op=None):
@@ -46,12 +41,7 @@ def candle(t, close='100', low='99', high='101', volume='100000000', op=None):
 
 def days():
     # Latest completed day breaks out; previous SMA20 > SMA60, rising SMA20.
-    rows=[]
-    for i in range(120):
-        close = '80' if i<70 else '90' if i<100 else '100'
-        rows.append(candle(START-timedelta(days=120-i),close,str(D(close)-1),str(D(close)+1)))
-    rows[-1]=candle(START-timedelta(days=1),'102','100','103','200000000')
-    return rows
+    return fixture_daily_bars(NOW, 120)
 
 
 def minutes():
@@ -92,10 +82,7 @@ class FakeClient:
     def get(self,path,**params):
         self.calls.append((path,params))
         if path.endswith('/market-calendar/KR'):
-            c=cal()
-            if params.get('date') not in (None,NOW.date().isoformat()):
-                d=datetime.fromisoformat(params['date']).replace(hour=10,tzinfo=KST)
-                c=cal(d)
+            c=fixture_calendar(params.get('date') or NOW.date().isoformat())
             if self.closed:c['today']['integrated']=None
             return c
         if path.endswith('/rankings'):
@@ -103,7 +90,8 @@ class FakeClient:
             return {'rankedAt':NOW.isoformat(),'rankings':[{'rank':1,'symbol':'000001','currency':'KRW',
                  'price':{'lastPrice':'101.2','basePrice':'100','changeRate':'0.012'},
                  'tradingVolume':'100000000','tradingAmount':'10000000000'}]}
-        if path.endswith('/stocks'):return [stock(nxt=self.nxt)]
+        if path.endswith('/stocks'):
+            return [stock(sym, nxt=self.nxt) for sym in params['symbols'].split(',')]
         if path.endswith('/warnings'):return self.warning
         if path.endswith('/prices'):
             return [{'symbol':'000001','currency':'KRW','lastPrice':self.price,
@@ -158,6 +146,22 @@ class ConfigTests(unittest.TestCase):
 
 
 class DataTests(unittest.TestCase):
+    def test_listing_history_requires_proven_recent_listing(self):
+        for horizon, needed in [('day', 20), ('swing', 65)]:
+            raw = [dict(stock(), listDate=(NOW - timedelta(days=needed-1)).date().isoformat())]
+            with self.assertRaises(NoMatch) as caught:
+                stock_eligibility(raw, '000001', horizon, NOW)
+            self.assertEqual(caught.exception.code, 'listing-history-too-short')
+            self.assertEqual(caught.exception.details['requiredDailyBars'], needed)
+            raw[0]['listDate'] = (NOW - timedelta(days=needed)).date().isoformat()
+            stock_eligibility(raw, '000001', horizon, NOW)
+        for listing in (None, '2000-01-01'):
+            stock_eligibility([dict(stock(), listDate=listing)], '000001', 'day', NOW)
+        for listing in ('invalid', (NOW + timedelta(days=1)).date().isoformat()):
+            with self.assertRaises(TmonError) as caught:
+                stock_eligibility([dict(stock(), listDate=listing)], '000001', 'day', NOW)
+            self.assertNotIsInstance(caught.exception, NoMatch)
+
     def test_next_boundary_is_excluded_without_changing_completed_bars(self):
         for second in (0, 5, 36, 59):
             now = NOW.replace(second=second)
@@ -271,6 +275,84 @@ class StrategyTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def test_ineligible_symbols_do_not_consume_detail_limit(self):
+        class PoolClient(FakeClient):
+            def get(self, path, **params):
+                raw = super().get(path, **params)
+                if path.endswith('/rankings'):
+                    raw['rankings'] = [dict(raw['rankings'][0], symbol='%06d' % i, rank=i) for i in range(1, 7)]
+                elif path.endswith('/stocks'):
+                    sym = params['symbols']
+                    raw = [dict(stock(s), securityType='ETF' if int(s) <= 2 else 'STOCK')
+                           for s in sym.split(',')]
+                elif path.endswith('/candles') and params['interval'] == '1m':
+                    for bar in raw['candles']:
+                        bar['volume'] = '100000'  # No volume breakout.
+                return raw
+        config = load_config(research='off', limit=1)
+        config['universe'].update(detailLimit=2, researchLimit=1)
+        client = PoolClient()
+        code, result, _ = self.run_engine(client, config=config)
+        self.assertEqual(code, 0)
+        self.assertEqual(result['meta']['outcomeReason'], 'no-match')
+        screen = result['meta']['evaluationSummary']['screening']
+        self.assertEqual(screen['detailEvaluatedCount'], 2)
+        self.assertEqual(screen['eligibilityExcludedCount'], 2)
+        self.assertEqual(screen['evaluatedCount'], 4)
+        self.assertEqual([r['symbol'] for r in result['meta']['notEvaluated']], ['000005', '000006'])
+        chart_symbols = {p['symbol'] for path, p in client.calls if path == '/api/v1/candles'}
+        self.assertEqual(chart_symbols, {'000003', '000004'})
+
+    def test_recent_listing_is_no_match_but_old_missing_history_is_data_error(self):
+        for listing, expected_code, reason in [('2026-09-03', 0, 'listing-history-too-short'),
+                                               ('2000-01-01', 5, 'insufficient-history'),
+                                               (None, 5, 'insufficient-history')]:
+            client = FakeClient()
+            original = client.get
+            def get(path, **params):
+                raw = original(path, **params)
+                if path.endswith('/stocks'):
+                    raw[0]['listDate'] = listing
+                elif path.endswith('/candles') and params['interval'] == '1d':
+                    raw['candles'] = [days()[-1]]
+                return raw
+            client.get = get
+            code, result, _ = self.run_engine(client)
+            self.assertEqual(code, expected_code)
+            if reason == 'listing-history-too-short':
+                self.assertIn(reason, [row['reason'] for row in result['meta']['preExcluded']])
+                self.assertEqual(result['meta']['preExcludedCount'], 1)
+            else:
+                # PR4-B compares the exact common trading-date window, so a
+                # sparse response is an explicit date gap.
+                self.assertIn('daily-gap', result['meta']['excludedCounts'])
+            if expected_code == 0:
+                self.assertEqual(result['meta']['outcomeReason'], 'no-match')
+                self.assertFalse(any(path.endswith('/candles') for path, _ in client.calls))
+
+    def test_eligibility_backfill_stops_at_data_budget(self):
+        clock = [0.0]
+        client = FakeClient()
+        original = client.get
+        def get(path, **params):
+            raw = original(path, **params)
+            if path.endswith('/rankings'):
+                raw['rankings'] = [dict(raw['rankings'][0], symbol='%06d' % i, rank=i) for i in range(1, 4)]
+            if path.endswith('/stocks'):
+                clock[0] = 81.0
+                raw[0]['securityType'] = 'ETF'
+            return raw
+        client.get = get
+        with tempfile.TemporaryDirectory() as td:
+            engine = Engine(load_config(research='off'), 'day', 3, client, Store(Path(td).resolve()),
+                            now=lambda: NOW, clock=lambda: clock[0])
+            result = envelope('recommend')
+            self.assertEqual(engine.run(result), 5)
+        self.assertEqual(result['meta']['evaluationSummary']['screening']['detailEvaluatedCount'], 0)
+        self.assertEqual([r['symbol'] for r in result['meta']['notEvaluated']], ['000002', '000003'])
+        self.assertTrue(all(r['reason'] == 'not-evaluated-budget' for r in result['meta']['notEvaluated']))
+        self.assertEqual(sum(path.endswith('/stocks') for path, _ in client.calls), 1)
+
     def test_future_bar_policy_and_diagnostics_end_to_end(self):
         class FutureClient(FakeClient):
             offset = 1
@@ -284,7 +366,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(result['meta']['outcomeReason'], 'recommended')
         warnings = [w for w in result['warnings'] if w['code'] == 'future-minute-bar-skipped']
-        self.assertEqual(len(warnings), 2)  # Screening and final verification.
+        self.assertEqual(len(warnings), 1)  # Final verification does not fetch minute bars.
         self.assertEqual(warnings[0]['symbol'], '000001')
         self.assertEqual(warnings[0]['retrievedAt'], NOW.isoformat())
         client.offset = 2

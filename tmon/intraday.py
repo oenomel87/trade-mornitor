@@ -47,31 +47,101 @@ def session(raw, now, horizon):
         raise invalid_data('시장 세션을 해석할 수 없습니다.') from None
 
 
-def completed_minutes(raw, now, start, delay=5, warnings=None):
+def signal_window_end(session_start, phase_started_at, delay=5):
+    """Frozen signal window end F = S + n*300 where n=floor((P-S-D)/300.
+
+    Returns None when n <= 0 (no completed 5-minute bar yet). Callers
+    treat n < 6 as expected session-not-ready, not unexplained missing data.
+    """
+    try:
+        delta = (phase_started_at - session_start).total_seconds() - delay
+    except (TypeError, AttributeError):
+        raise invalid_data('신호 구간 시각을 확인할 수 없습니다.') from None
+    import math
+    n = math.floor(delta / 300)
+    if n <= 0:
+        return None
+    return session_start + timedelta(seconds=n * 300)
+
+
+def filter_complete_bars(raw, received_at, phase_started_at, delay, normalize_fn,
+                          session_start=None, window_start=None, window_end=None,
+                          warnings=None, future_code='future-minute-bar',
+                          future_message='다음 분 경계보다 먼 미래 분봉입니다.',
+                          skip_code='future-minute-bar-skipped',
+                          skip_message='다음 분 경계의 미래 봉을 계산에서 제외했습니다.'):
+    """Shared PR1 time-filter path for stock and index 1-minute bars.
+
+    Work-spec order shared by both legs: parse/check timestamp first and
+    apply the allowed next-minute boundary exclusion using received_at,
+    then normalize/validate only retained candles. A malformed
+    next-boundary candle is therefore skipped with a diagnostic instead
+    of failing the symbol; farther future still fails. Completion uses
+    the actual phase start (barEnd + D <= phase); clipping uses the
+    frozen window with no extra delay. ``normalize_fn`` validates the
+    leg-specific schema (stock: currency/OHLC via normalize_candle;
+    index: actual no-currency MarketIndicatorCandle schema).
+    """
     if not isinstance(raw, dict) or not isinstance(raw.get('candles'), list):
         raise invalid_data()
     rows = {}
     for item in raw['candles']:
-        t, row = normalize_candle(item, 'KRW')
+        try:
+            raw_ts = item.get('timestamp') if isinstance(item, dict) else None
+            t = timestamp(raw_ts)
+        except Exception:
+            raise invalid_data('분봉 시작 시각을 확인할 수 없습니다.') from None
         if t.second or t.microsecond:
             raise invalid_data('분봉 시작 시각이 분 경계가 아닙니다.')
-        next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        next_boundary = received_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
         if t > next_boundary:
-            error = TmonError('future-minute-bar', '다음 분 경계보다 먼 미래 분봉입니다.')
-            error.details = {'evaluatedAt': now.isoformat(), 'barTimestamp': t.isoformat()}
+            error = TmonError(future_code, future_message)
+            error.details = {'evaluatedAt': received_at.isoformat(), 'barTimestamp': t.isoformat()}
             raise error
-        if t > now:
+        if t > received_at:
             if warnings is not None:
-                warnings.append({'code': 'future-minute-bar-skipped',
-                                 'message': '다음 분 경계의 미래 봉을 계산에서 제외했습니다.',
-                                 'evaluatedAt': now.isoformat(), 'barTimestamp': t.isoformat()})
+                warnings.append({'code': skip_code, 'message': skip_message,
+                                 'evaluatedAt': received_at.isoformat(), 'barTimestamp': t.isoformat()})
             continue
-        if t < start or t + timedelta(minutes=1, seconds=delay) > now:
+        _, row = normalize_fn(item)
+        if (session_start is not None and t < session_start) or \
+                t + timedelta(minutes=1, seconds=delay) > phase_started_at:
+            continue
+        if window_start is not None and t < window_start:
+            continue
+        if window_end is not None and t + timedelta(minutes=1) > window_end:
             continue
         if t in rows and rows[t] != row:
             raise invalid_data('중복 분봉 값이 다릅니다.')
         rows[t] = row
     return [rows[t] for t in sorted(rows)]
+
+
+def completed_minutes(raw, now, start, delay=5, warnings=None, *,
+                      received_at=None, phase_started_at=None, window_end=None):
+    """Completed 1-minute bars with separated time roles (PR1).
+
+    - ``received_at``: actual response receipt instant for future-boundary
+      validation (next-minute-boundary exclusion). Defaults to ``now`` so
+      existing brief calls are unchanged.
+    - ``phase_started_at``: actual screening-phase start for completion
+      (barEnd + D <= phaseStartedAt). Defaults to ``received_at``.
+    - ``window_end``: frozen signalWindowEndAt F for clipping
+      (barEnd <= F, no additional delay subtracted). None disables clipping.
+
+    ``now`` is kept for backward compatibility and supplies defaults.
+    Uses the shared filter_complete_bars path (same PR1 future-before-OHLC,
+    completion and clip rules as the index leg).
+    """
+    received = received_at if received_at is not None else now
+    phase = phase_started_at if phase_started_at is not None else received
+
+    def _stock_normalizer(item):
+        return normalize_candle(item, 'KRW')
+
+    return filter_complete_bars(raw, received, phase, delay, _stock_normalizer,
+                                session_start=start, window_start=None,
+                                window_end=window_end, warnings=warnings)
 
 
 def five_minutes(rows, start):

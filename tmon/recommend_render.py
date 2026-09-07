@@ -38,6 +38,9 @@ def render_recommend(data, meta, table):
     summary = meta.get('evaluationSummary')
     if summary:
         screen = summary['screening']
+        if 'detailEvaluatedCount' in screen:
+            print('대상 사전 제외 %d개 · 보통주 상세평가 %d개' %
+                  (screen['eligibilityExcludedCount'], screen['detailEvaluatedCount']))
         print('초기 평가 %d개 · 통과 %d개 · 조건·대상 미충족 %d개 · 데이터 판단 불가 %d개 · 미평가 %d개' %
               (screen['evaluatedCount'], screen['passedCount'], screen['conditionExcludedCount'],
                screen['dataUnavailableCount'], summary['notEvaluatedCount']))

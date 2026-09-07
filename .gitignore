@@ -7,3 +7,6 @@ dist/
 .env
 .env.*
 .DS_Store
+
+# Local OpenCode implementation checkpoints and private run logs
+/local-artifacts/opencode-snapshot-v2/
